@@ -1,4 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
+import { generateClient } from "aws-amplify/data";
+import { useAuthenticator } from "@aws-amplify/ui-react";
+
+const client = generateClient();
 
 // ─── Theme tokens ─────────────────────────────────────────────
 const THEMES = {
@@ -552,6 +556,7 @@ function EntryForm({ theme, onSave, onClose, editEntry = null, aiLoading, onAIAs
 
 // ─── Main App ─────────────────────────────────────────────────
 export default function App() {
+  const { signOut, user } = useAuthenticator();
   const [theme, setTheme] = useState("NEON");
   const [entries, setEntries] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -560,38 +565,31 @@ export default function App() {
   const [filterTag, setFilterTag] = useState("ALL");
   const [filterStatus, setFilterStatus] = useState("ALL");
   const [aiLoading, setAiLoading] = useState(false);
-  const [storageReady, setStorageReady] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const t = THEMES[theme];
 
-  // ── Persistent storage ──────────────────────────────────────
   useEffect(() => {
-    async function load() {
-      try {
-        const result = await window.storage.get("playbook_entries");
-        if (result?.value) setEntries(JSON.parse(result.value));
-        const themeResult = await window.storage.get("playbook_theme");
-        if (themeResult?.value) setTheme(themeResult.value);
-        setStorageReady(true);
-      } catch {
-        setStorageReady(true);
-      }
-      setLoading(false);
-    }
-    load();
+    const savedTheme = localStorage.getItem("playbook_theme");
+    if (savedTheme && THEMES[savedTheme]) setTheme(savedTheme);
+
+    const sub = client.models.PlaybookEntry.observeQuery().subscribe({
+      next: ({ items }) => {
+        setEntries(
+          [...items].sort((a, b) =>
+            String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+          ),
+        );
+        setLoading(false);
+      },
+      error: () => setLoading(false),
+    });
+    return () => sub.unsubscribe();
   }, []);
 
-  async function saveEntries(newEntries) {
-    setEntries(newEntries);
-    try {
-      await window.storage.set("playbook_entries", JSON.stringify(newEntries));
-    } catch { }
-  }
-
-  async function saveTheme(th) {
+  function saveTheme(th) {
     setTheme(th);
-    try { await window.storage.set("playbook_theme", th); } catch { }
+    localStorage.setItem("playbook_theme", th);
   }
 
   // ── AI Assist ───────────────────────────────────────────────
@@ -632,29 +630,32 @@ Title: ${form.title || "(none yet)"}`
     setAiLoading(false);
   }
 
-  // ── CRUD ────────────────────────────────────────────────────
-  function handleSave(form) {
+  async function handleSave(form) {
     if (!form.title || !form.prompt) return;
+    const payload = {
+      title: form.title,
+      prompt: form.prompt,
+      output: form.output || "",
+      tool: form.tool,
+      status: form.status,
+      tags: form.tags || [],
+      modelVersion: form.modelVersion || "",
+      context: form.context || "",
+    };
     if (editEntry) {
-      const updated = entries.map(e =>
-        e.id === editEntry.id ? { ...e, ...form, updatedAt: new Date().toISOString() } : e
-      );
-      saveEntries(updated);
+      await client.models.PlaybookEntry.update({ id: editEntry.id, ...payload });
     } else {
-      const newEntry = {
-        ...form,
-        id: crypto.randomUUID?.() || Date.now().toString(),
-        createdAt: new Date().toISOString(),
+      await client.models.PlaybookEntry.create({
+        ...payload,
         provenanceHash: generateHash(),
-      };
-      saveEntries([newEntry, ...entries]);
+      });
     }
     setShowForm(false);
     setEditEntry(null);
   }
 
-  function handleDelete(id) {
-    saveEntries(entries.filter(e => e.id !== id));
+  async function handleDelete(id) {
+    await client.models.PlaybookEntry.delete({ id });
   }
 
   function handleEdit(entry) {
@@ -779,6 +780,24 @@ Title: ${form.title || "(none yet)"}`
               }}
             >
               + New Panel
+            </button>
+            <button
+              onClick={signOut}
+              style={{
+                background: "transparent",
+                border: `2px solid ${t.accent2}`,
+                color: t.accent2,
+                borderRadius: t.cornerStyle || "4px",
+                padding: "7px 12px",
+                fontSize: "10px",
+                fontFamily: t.bodyFont,
+                letterSpacing: "1px",
+                textTransform: "uppercase",
+                cursor: "pointer",
+                fontWeight: "700",
+              }}
+            >
+              Sign out
             </button>
           </div>
         </div>
@@ -947,10 +966,10 @@ Title: ${form.title || "(none yet)"}`
               gap: "8px",
             }}>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "9px", color: t.textMuted, letterSpacing: "1px" }}>
-                PLAYBOOK_STORE · {entries.length} entries · persistent via Artifact storage
+                PLAYBOOK_STORE · {entries.length} entries · {user?.signInDetails?.loginId || user?.username || "signed in"}
               </span>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "9px", color: t.accent3, letterSpacing: "1px" }}>
-                Supabase schema: prisma/schema.prisma · client: src/prisma.client.ts
+                Amplify Data · Cognito email auth
               </span>
             </div>
           )}
